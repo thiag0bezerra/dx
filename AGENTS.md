@@ -2,22 +2,42 @@
 
 This document defines the explicit workflow for software development, ensuring consistency, quality, and manageability for teams of any size (from 1 to N).
 
+**AUTHORITY**: This workflow is non-negotiable. Deviations require explicit justification documented in the Issue or PR.
+
+---
+
 ## Prerequisites
 
-Before following this workflow, ensure the following tools are installed and configured:
+Before following this workflow, verify the following tools are installed and configured:
 
--   **Git**: Version control system.
--   **GitHub CLI (`gh`)**: Authenticated with `gh auth login`.
--   **Repository Access**: Push permissions to the remote repository.
+| Tool | Verification Command | Expected Output | Failure Action |
+|------|---------------------|-----------------|----------------|
+| Git | `git --version` | `git version X.Y.Z` | Install Git |
+| GitHub CLI | `gh auth status` | Contains "Logged in" | Run `gh auth login` |
+| Repository Access | `git push --dry-run origin master 2>&1` | Exit code 0 | Fix permissions |
+
+**Verification Script:**
+```bash
+#!/bin/bash
+set -e
+git --version || { echo "FAIL: Git not installed"; exit 1; }
+gh auth status 2>&1 | grep -q "Logged in" || { echo "FAIL: Not authenticated"; exit 1; }
+git push --dry-run origin master 2>&1 || { echo "FAIL: No push access"; exit 1; }
+echo "PASS: All prerequisites met"
+```
+
+**BLOCKING**: Exit code != 0 halts workflow.
+
+---
 
 ## Core Principles
 
-1.  **Traceability**: Every line of code must be traceable to an Issue. No code change exists without a corresponding Issue.
-2.  **Linear History**: We use **Rebase** to maintain a clean, linear project history. Merge commits are not allowed.
-3.  **Automation**: We prefer CLI tools (`gh`, `git`) over GUI actions to reduce friction and context switching.
-4.  **Objectivity**: Code reviews and merges are based on defined criteria, not opinions.
-5.  **Communication**: Maintain a serious, concise, and professional tone. **No emojis** in commits, issues, or PRs.
-6.  **Single Responsibility**: One Issue per task. One PR per Issue. One context per commit.
+1. **Traceability**: Every line of code MUST be traceable to an Issue. No code change exists without a corresponding Issue.
+2. **Linear History**: We use **Rebase** exclusively. Merge commits are NEVER allowed.
+3. **Automation**: CLI tools (`gh`, `git`) over GUI. No exceptions.
+4. **Objectivity**: Reviews based on defined criteria only. Opinion-based feedback is non-blocking.
+5. **Communication**: Serious, concise, professional. No emojis. No ambiguity.
+6. **Single Responsibility**: One Issue = One PR = One context. Violations require Issue split.
 
 ---
 
@@ -25,33 +45,55 @@ Before following this workflow, ensure the following tools are installed and con
 
 ### Phase 1: Synchronization & Task Definition
 
-Before starting any work, ensure your environment is up-to-date and the task is clearly defined.
-
 **Objective:** Guarantee local repository is synchronized and work is defined in a trackable Issue.
 
 **Steps:**
 
-| Step | Action | Command |
-|------|--------|---------|
-| 1.1 | Switch to master branch | `git checkout master` |
-| 1.2 | Pull latest changes | `git pull origin master` |
-| 1.3 | List assigned issues | `gh issue list --assignee "@me"` |
-| 1.4 | Create issue (if needed) | `gh issue create --title "<type>: <description>" --body "<body>"` |
+| Step | Action | Command | Validation |
+|------|--------|---------|------------|
+| 1.1 | Switch to master | `git checkout master` | Exit code 0 |
+| 1.2 | Pull latest | `git pull origin master` | Exit code 0 |
+| 1.3 | Verify sync | `git rev-parse HEAD` vs `git rev-parse origin/master` | Must match |
+| 1.4 | List assigned issues | `gh issue list --assignee "@me" --state open --json number,title` | JSON output |
+| 1.5 | Create issue (if needed) | See Issue Creation below | Issue number returned |
+
+**Issue Creation Command:**
+```bash
+gh issue create \
+  --title "<type>: <description>" \
+  --body "## Problem / Feature
+<description>
+
+## Acceptance Criteria
+- [ ] <criterion-1>
+- [ ] <criterion-2>
+
+## Technical Notes
+<notes>"
+```
+
+**Issue Title Format (regex):** `^(feat|fix|chore|refactor|docs): .{10,72}$`
 
 **Exit Criteria:**
-- [ ] Local master is synchronized with remote.
-- [ ] An Issue exists with clear Acceptance Criteria.
-- [ ] Issue number is noted for branch naming.
+- [ ] `git rev-parse HEAD` equals `git rev-parse origin/master`
+- [ ] Issue exists with at least one Acceptance Criterion checkbox
+- [ ] Issue number captured: `ISSUE_NUMBER=<number>`
+
+**GATE Validation:**
+```bash
+ISSUE_BODY=$(gh issue view $ISSUE_NUMBER --json body -q '.body')
+echo "$ISSUE_BODY" | grep -qE "^\s*- \[ \]" || { echo "FAIL: No acceptance criteria"; exit 1; }
+```
 
 ---
 
 ### Phase 2: Branching
 
-Create an isolated environment for your task.
-
 **Objective:** Establish a dedicated branch linked to a single Issue.
 
 **Naming Convention:** `<issue-number>-<type>-<short-description>`
+
+**Format Validation (regex):** `^[0-9]+-(?:feat|fix|chore|refactor|docs)-[a-z0-9-]{3,30}$`
 
 **Valid Types:**
 | Type | Description |
@@ -64,27 +106,31 @@ Create an isolated environment for your task.
 
 **Command:**
 ```bash
-git checkout -b <issue-number>-<type>-<short-description>
-# Example: git checkout -b 123-feat-user-login
+BRANCH_NAME="${ISSUE_NUMBER}-<type>-<short-description>"
+echo "$BRANCH_NAME" | grep -qE "^[0-9]+-(?:feat|fix|chore|refactor|docs)-[a-z0-9-]{3,30}$" || { echo "FAIL: Invalid branch name"; exit 1; }
+git checkout -b "$BRANCH_NAME"
 ```
 
 **Exit Criteria:**
-- [ ] Branch created from latest master.
-- [ ] Branch name follows naming convention.
-- [ ] Branch is linked to exactly one Issue.
+- [ ] `git branch --show-current` matches naming regex
+- [ ] `git log --oneline master..HEAD` returns empty (branch just created)
+- [ ] Branch name contains exactly one Issue number
+
+**GATE Validation:**
+```bash
+CURRENT=$(git branch --show-current)
+echo "$CURRENT" | grep -qE "^[0-9]+-" || { echo "FAIL: Branch must start with issue number"; exit 1; }
+```
 
 ---
 
 ### Phase 3: Implementation & Committing
 
-Work on your branch. Commit often locally.
-
 **Objective:** Implement the solution with atomic, well-documented commits.
 
-**Commit Format (Conventional Commits):**
-```
-<type>(<scope>): <subject>
-```
+**Commit Format (Conventional Commits):** `<type>(<scope>): <subject>`
+
+**Format Validation (regex):** `^(feat|fix|docs|style|refactor|test|chore)\([a-z0-9-]+\): .{10,72}$`
 
 **Commit Types:**
 | Type | Purpose | Version Impact |
@@ -98,139 +144,157 @@ Work on your branch. Commit often locally.
 | `chore` | Maintenance | None |
 
 **Commit Rules:**
-1. Each commit must represent a single logical change.
+1. Each commit represents a single logical change.
 2. Do not mix different types in one commit.
 3. Use selective staging (`git add <file>`) when changes span multiple contexts.
+4. Maximum 50 characters for subject line summary.
 
 **Commands:**
 ```bash
-# Stage specific files
 git add <file1> <file2>
-
-# Commit with message
-git commit -m "<type>(<scope>): <subject>"
-
-# Example
-git commit -m "feat(auth): implement jwt token generation"
+COMMIT_MSG="<type>(<scope>): <subject>"
+echo "$COMMIT_MSG" | grep -qE "^(feat|fix|docs|style|refactor|test|chore)\([a-z0-9-]+\): .{10,72}$" || { echo "FAIL: Invalid commit format"; exit 1; }
+git commit -m "$COMMIT_MSG"
 ```
 
 **Exit Criteria:**
-- [ ] Each commit follows Conventional Commits format.
-- [ ] Each commit is atomic (single context).
-- [ ] Commit history is readable and logical.
+- [ ] All commits on branch match format regex: `git log --oneline master..HEAD --format="%s"`
+- [ ] Each commit touches files related to single context
+- [ ] No commits with message containing "WIP", "fixup", or "squash"
 
 ---
 
 ### Phase 4: Self-Review & Verification
 
-**Before** opening a PR, you must guarantee quality.
-
 **Objective:** Validate implementation locally before requesting review.
 
 **Verification Checklist:**
-| Check | Command (adjust per project) | Required |
-|-------|------------------------------|----------|
-| Code compiles/builds | `npm run build` / `go build` / `dotnet build` | Yes |
-| Tests pass | `npm test` / `pytest` / `go test ./...` | Yes |
-| Linting passes | `npm run lint` / `eslint .` | Yes |
-| New tests added | Manual verification | Yes (for feat/fix) |
+| Check | Command | Success Criteria | Required |
+|-------|---------|------------------|----------|
+| Build | Project-specific | Exit code 0 | Yes |
+| Tests | Project-specific | Exit code 0, 0 failures | Yes |
+| Lint | Project-specific | Exit code 0, 0 errors | Yes |
+| New tests exist | See below | At least 1 new test file for feat/fix | Yes (feat/fix) |
 
-**Commands:**
+**New Test Verification (for feat/fix):**
 ```bash
-# Run full verification (example for Node.js)
-npm run build
-npm test
-npm run lint
+CHANGED_TEST_FILES=$(git diff --name-only master..HEAD | grep -E "\.(test|spec)\.[jt]sx?$|_test\.go$|test_.*\.py$" | wc -l)
+[ "$CHANGED_TEST_FILES" -gt 0 ] || { echo "FAIL: No test files modified"; exit 1; }
 ```
 
 **Exit Criteria:**
-- [ ] Build succeeds with no errors.
-- [ ] All existing tests pass.
-- [ ] New tests cover the changes (for feat/fix).
-- [ ] No linting errors.
+- [ ] Build command exits with code 0
+- [ ] Test command exits with code 0
+- [ ] Lint command exits with code 0
+- [ ] For feat/fix: `$CHANGED_TEST_FILES > 0`
+
+**GATE**: All exit codes must be 0. No exceptions.
 
 ---
 
 ### Phase 5: Pull Request (PR)
 
-Publish your changes for review.
-
 **Objective:** Create a reviewable PR linked to the Issue.
 
 **Steps:**
 
-| Step | Action | Command |
-|------|--------|---------|
-| 5.1 | Push branch | `git push -u origin HEAD` |
-| 5.2 | Create PR | `gh pr create --title "<type>(<scope>): <subject>" --body "Closes #<issue-number>. <description>"` |
-| 5.3 | Monitor CI | `gh run watch` |
+| Step | Action | Command | Validation |
+|------|--------|---------|------------|
+| 5.1 | Push branch | `git push -u origin HEAD` | Exit code 0 |
+| 5.2 | Create PR | See below | PR URL returned |
+| 5.3 | Verify CI started | `gh run list --branch $(git branch --show-current) --limit 1` | Run exists |
 
-**PR Title Format:** Must match the primary commit type.
+**PR Creation Command:**
+```bash
+gh pr create \
+  --title "<type>(<scope>): <subject>" \
+  --body "## Related Issue
+Closes #${ISSUE_NUMBER}
 
-**PR Body Requirements:**
-- Must reference the Issue with `Closes #<issue-number>`.
-- Must describe what was implemented.
+## Type of Change
+- [x] <type>
+
+## Summary
+<description>
+
+## Verification Checklist
+- [x] Code follows project style guidelines
+- [x] Self-review completed
+- [x] Tests added for new functionality
+- [x] All tests pass locally
+- [x] CI checks pass"
+```
+
+**PR Title Format (regex):** `^(feat|fix|docs|style|refactor|test|chore)\([a-z0-9-]+\): .{10,72}$`
 
 **Exit Criteria:**
-- [ ] Branch pushed to remote.
-- [ ] PR created with correct title format.
-- [ ] PR body references the Issue.
-- [ ] CI pipeline triggered.
+- [ ] `gh pr view --json url` returns valid URL
+- [ ] PR body contains `Closes #<issue-number>`
+- [ ] `gh run list` shows at least one run for current branch
+
+**GATE Validation:**
+```bash
+PR_BODY=$(gh pr view --json body -q '.body')
+echo "$PR_BODY" | grep -qE "Closes #[0-9]+" || { echo "FAIL: PR must reference issue"; exit 1; }
+```
 
 ---
 
 ### Phase 6: Code Review
 
-Review based on **facts**, not opinions.
-
 **Objective:** Validate PR meets objective quality criteria.
 
 **Review Checklist:**
-| Criterion | Question | Blocking |
-|-----------|----------|----------|
-| Functionality | Does it meet the Issue's Acceptance Criteria? | Yes |
-| CI Status | Do all automated checks pass? | Yes |
-| Commit History | Are commits atomic and follow Conventional Commits? | Yes |
-| Test Coverage | Are new changes covered by tests? | Yes |
-| Simplicity | Is the implementation as simple as possible? | No |
+| Criterion | Validation Command | Blocking |
+|-----------|-------------------|----------|
+| Functionality | Manual verification against Acceptance Criteria | Yes |
+| CI Status | `gh pr checks --json state -q '.[].state' \| grep -v SUCCESS` returns empty | Yes |
+| Commit History | All commits match format regex | Yes |
+| Test Coverage | New tests exist for feat/fix | Yes |
+| Simplicity | Subjective assessment | No |
 
 **Review Commands:**
 ```bash
-# Checkout PR locally for testing
+# Checkout PR locally
 gh pr checkout <pr-number>
+
+# Verify CI status (all must be SUCCESS)
+gh pr checks --json state -q '.[].state' | sort -u
+# Expected output: SUCCESS (only)
 
 # Approve PR
 gh pr review --approve --body "LGTM: All criteria met."
 
-# Request changes
-gh pr review --request-changes --body "Blocking: <specific issue>"
+# Request changes (blocking issues only)
+gh pr review --request-changes --body "Blocking: <specific issue with line reference>"
 ```
 
 **For Solo Teams:**
 - Self-review is mandatory.
-- Complete the review checklist before merging.
-- Document the self-review in the PR.
+- Document self-review: `gh pr comment --body "Self-review completed. Checklist verified."`
 
 **Exit Criteria:**
-- [ ] All review criteria validated.
-- [ ] PR approved (self or peer).
-- [ ] All CI checks pass.
+- [ ] `gh pr checks` shows all SUCCESS
+- [ ] PR has at least one approval
+- [ ] No unresolved review comments with "Blocking:" prefix
 
 ---
 
 ### Phase 7: Integration (Merge)
 
-Merge using **Rebase** to maintain linear history.
-
 **Objective:** Integrate changes into master with clean history.
 
 **Pre-Merge Verification:**
 ```bash
-# Ensure branch is up-to-date with master
 git fetch origin master
 git rebase origin/master
 
-# Resolve conflicts if any, then force push
+# If conflicts exist:
+# 1. Resolve each file
+# 2. git add <resolved-file>
+# 3. git rebase --continue
+# 4. Repeat until complete
+
 git push --force-with-lease
 ```
 
@@ -239,16 +303,21 @@ git push --force-with-lease
 gh pr merge --rebase --delete-branch
 ```
 
+**Post-Merge Validation:**
+```bash
+# Verify no merge commits
+git log --oneline --merges origin/master~10..origin/master | wc -l
+# Expected: 0
+```
+
 **Exit Criteria:**
-- [ ] PR merged via rebase.
-- [ ] Remote branch deleted.
-- [ ] No merge commits created.
+- [ ] `gh pr view --json state -q '.state'` returns "MERGED"
+- [ ] `git branch -r | grep <branch-name>` returns empty (remote deleted)
+- [ ] Merge commit count remains 0
 
 ---
 
 ### Phase 8: Cleanup
-
-Remove local artifacts to keep workspace clean.
 
 **Objective:** Maintain clean local environment.
 
@@ -257,12 +326,14 @@ Remove local artifacts to keep workspace clean.
 git checkout master
 git pull origin master
 git branch -D <branch-name>
+git remote prune origin
 ```
 
 **Exit Criteria:**
-- [ ] Local master updated.
-- [ ] Local feature branch deleted.
-- [ ] Workspace ready for next task.
+- [ ] `git branch --show-current` returns "master"
+- [ ] `git rev-parse HEAD` equals `git rev-parse origin/master`
+- [ ] `git branch | grep <branch-name>` returns empty
+- [ ] No stale remote-tracking branches
 
 ---
 
@@ -274,27 +345,30 @@ git branch -D <branch-name>
 Is there a code change needed?
 ├── Yes → Does an Issue exist for this change?
 │   ├── Yes → Use existing Issue
-│   └── No → Create new Issue
+│   └── No → Create new Issue with Acceptance Criteria
 └── No → No Issue needed
 ```
 
 ### When to Split Work
 
 ```
-Does the task require multiple types of changes (feat + refactor)?
-├── Yes → Create separate Issues for each type
-└── No → Single Issue is sufficient
+Does the task require multiple types of changes?
+├── feat + refactor → Create separate Issues
+├── feat + test → Single Issue (tests are part of feat)
+├── fix + docs → Single Issue (docs explain fix)
+└── refactor + refactor → Single Issue (same type)
 ```
 
 ### Handling Conflicts During Rebase
 
 ```
 Conflict detected during rebase?
-├── Yes → Resolve conflicts manually
-│   ├── Stage resolved files: git add <file>
-│   ├── Continue rebase: git rebase --continue
-│   └── If stuck: git rebase --abort (start over)
-└── No → Proceed with merge
+├── Yes → For each conflicting file:
+│   ├── Open file, resolve conflict markers
+│   ├── git add <file>
+│   ├── git rebase --continue
+│   └── If unresolvable: git rebase --abort, reassess approach
+└── No → Proceed with push
 ```
 
 ---
@@ -305,15 +379,15 @@ Conflict detected during rebase?
 
 ```markdown
 ## Problem / Feature
-<!-- Concise description of what needs to be solved or added -->
+<!-- Concise description: what needs to be solved or added -->
 
 ## Acceptance Criteria
 <!-- Definition of Done - Specific and Testable -->
-- [ ] Criterion 1
-- [ ] Criterion 2
+- [ ] <criterion-1: measurable outcome>
+- [ ] <criterion-2: measurable outcome>
 
 ## Technical Notes
-<!-- Optional: Implementation details, constraints, dependencies -->
+<!-- Optional: constraints, dependencies, approach suggestions -->
 ```
 
 ### Pull Request Template
@@ -330,7 +404,7 @@ Closes #<issue-number>
 - [ ] chore: Maintenance
 
 ## Summary
-<!-- Brief description of changes -->
+<!-- What was implemented and why -->
 
 ## Verification Checklist
 - [ ] Code follows project style guidelines
@@ -344,16 +418,27 @@ Closes #<issue-number>
 
 ## Quick Reference
 
-| Phase | Key Command | Exit Gate |
-|-------|-------------|-----------|
-| 1. Sync | `git pull origin master` | Local synced, Issue exists |
-| 2. Branch | `git checkout -b <branch>` | Branch created |
-| 3. Commit | `git commit -m "<msg>"` | Atomic commits |
-| 4. Verify | `npm test` | All checks pass |
-| 5. PR | `gh pr create` | PR created, CI running |
-| 6. Review | `gh pr review --approve` | PR approved |
-| 7. Merge | `gh pr merge --rebase` | Merged, branch deleted |
-| 8. Cleanup | `git branch -D <branch>` | Local cleaned |
+| Phase | Key Command | Exit Gate Validation |
+|-------|-------------|---------------------|
+| 1. Sync | `git pull origin master` | `git rev-parse HEAD` == `origin/master` |
+| 2. Branch | `git checkout -b <branch>` | Branch name matches regex |
+| 3. Commit | `git commit -m "<msg>"` | Message matches regex |
+| 4. Verify | `<build> && <test> && <lint>` | All exit code 0 |
+| 5. PR | `gh pr create` | PR URL exists, CI triggered |
+| 6. Review | `gh pr review --approve` | All checks SUCCESS |
+| 7. Merge | `gh pr merge --rebase` | State = MERGED |
+| 8. Cleanup | `git branch -D <branch>` | Branch not found locally |
+
+---
+
+## Validation Regex Summary
+
+| Element | Regex Pattern |
+|---------|---------------|
+| Issue Title | `^(feat\|fix\|chore\|refactor\|docs): .{10,72}$` |
+| Branch Name | `^[0-9]+-(?:feat\|fix\|chore\|refactor\|docs)-[a-z0-9-]{3,30}$` |
+| Commit Message | `^(feat\|fix\|docs\|style\|refactor\|test\|chore)\([a-z0-9-]+\): .{10,72}$` |
+| PR Title | `^(feat\|fix\|docs\|style\|refactor\|test\|chore)\([a-z0-9-]+\): .{10,72}$` |
 
 ---
 
@@ -361,16 +446,20 @@ Closes #<issue-number>
 
 ```mermaid
 graph TD
-    A[Issue Created] --> B[Branch Created]
-    B --> C[Implementation]
-    C --> D[Local Verification]
-    D -->|Fail| C
-    D -->|Pass| E[Push & Create PR]
-    E --> F[CI Checks]
-    F -->|Fail| C
-    F -->|Pass| G[Code Review]
-    G -->|Changes Requested| C
-    G -->|Approved| H[Merge via Rebase]
-    H --> I[Delete Branch]
-    I --> J[Ready for Next Issue]
+    A[Issue Created] --> B{Has Acceptance Criteria?}
+    B -->|No| A
+    B -->|Yes| C[Branch Created]
+    C --> D{Name matches regex?}
+    D -->|No| C
+    D -->|Yes| E[Implementation]
+    E --> F[Local Verification]
+    F -->|Exit != 0| E
+    F -->|Exit == 0| G[Push & Create PR]
+    G --> H[CI Checks]
+    H -->|FAILURE| E
+    H -->|SUCCESS| I[Code Review]
+    I -->|Blocking issues| E
+    I -->|Approved| J[Merge via Rebase]
+    J --> K[Delete Branch]
+    K --> L[Ready for Next Issue]
 ```
